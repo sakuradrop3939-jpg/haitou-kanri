@@ -105,8 +105,7 @@ def get_annual_dividends(ticker: str, years: int = 6) -> dict:
 # ─── 銘柄情報（会社名・通貨・配当利回り） ─────────────────────────────────
 @st.cache_data(ttl=3600)
 def get_company_info(ticker: str) -> dict:
-    ticker=str(ticker)
-    ticker = str(ticker)
+    ticker = str(ticker).strip()
     try:
         info = yf.Ticker(ticker).info
         return {
