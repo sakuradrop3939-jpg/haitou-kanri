@@ -465,7 +465,7 @@ def tab_manage_holdings():
         if uploaded:
             try:
                 import io as _io, csv as _csv
-                raw_bytes = uploaded.read()
+                raw_bytes = uploaded.getvalue()
                 df_imp = None
                 for enc in ["cp932", "shift-jis", "utf-8-sig", "utf-8"]:
                     try:
