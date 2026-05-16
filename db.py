@@ -66,7 +66,19 @@ def _get_ws(name: str):
 # ─── 読み込み（キャッシュ付き） ──────────────────────────────────────────────
 @st.cache_data(ttl=30)
 def _read_sheet(name: str) -> pd.DataFrame:
-    ws = _get_ws(name)
+    import time
+    for attempt in range(3):
+        try:
+            ws = _get_ws(name)
+            records = ws.get_all_records(expected_headers=HEADERS[name])
+            break
+        except Exception:
+            if attempt < 2:
+                time.sleep(2 ** attempt)
+            else:
+                return pd.DataFrame(columns=HEADERS[name])
+    if not records:
+        return pd.DataFrame(columns=HEADERS[name])
     records = ws.get_all_records(expected_headers=HEADERS[name])
     if not records:
         return pd.DataFrame(columns=HEADERS[name])
