@@ -465,42 +465,40 @@ def tab_manage_holdings():
         if uploaded:
             try:
                 import io as _io, csv as _csv
-                def _parse_csv(f):
-                    for enc in ["cp932", "shift-jis", "utf-8-sig", "utf-8"]:
-                        try:
-                            f.seek(0)
-                            raw = f.read().decode(enc)
-                            ls = raw.splitlines()
-                            hrow = None
-                            for i, line in enumerate(ls):
-                                if "取得単価" in line and "株数" in line:
-                                    hrow = i
-                                    break
-                            if hrow is not None:
-                                reader = _csv.reader(ls[hrow:])
-                                next(reader)
-                                recs = []
-                                for row in reader:
-                                    if not row or not row[0].strip(): continue
-                                    c0 = row[0].strip()
-                                    if not c0[0].isdigit(): continue
-                                    pts = c0.split(None, 1)
-                                    code = pts[0].strip()
-                                    name = pts[1].strip() if len(pts)>1 else code
-                                    try:
-                                        sh = float(str(row[2]).replace(",",""))
-                                        ac = float(str(row[3]).replace(",",""))
-                                    except: continue
-                                    recs.append({"ticker":code+".T","name":name,"asset_type":"日本株","shares":sh,"avg_cost":ac,"currency":"JPY"})
-                                if recs: return pd.DataFrame(recs)
-                        except Exception: continue
-                    for enc in ["utf-8-sig", "cp932", "shift-jis"]:
-                        try:
-                            f.seek(0)
-                            return pd.read_csv(f, encoding=enc)
-                        except Exception: continue
-                    raise ValueError("読み込み失敗")
-                df_imp = _parse_csv(uploaded)
+                raw_bytes = uploaded.read()
+                df_imp = None
+                for enc in ["cp932", "shift-jis", "utf-8-sig", "utf-8"]:
+                    try:
+                        raw = raw_bytes.decode(enc)
+                        ls = raw.splitlines()
+                        hrow = None
+                        for i, line in enumerate(ls):
+                            if "取得単価" in line and "株数" in line:
+                                hrow = i
+                                break
+                        if hrow is not None:
+                            reader = _csv.reader(ls[hrow:])
+                            next(reader)
+                            recs = []
+                            for row in reader:
+                                if not row or not row[0].strip(): continue
+                                c0 = row[0].strip()
+                                if not c0 or not c0[0].isdigit(): continue
+                                pts = c0.split(None, 1)
+                                code = pts[0].strip()
+                                name = pts[1].strip() if len(pts)>1 else code
+                                try:
+                                    sh = float(str(row[2]).replace(",",""))
+                                    ac = float(str(row[3]).replace(",",""))
+                                except: continue
+                                recs.append({"ticker":code+".T","name":name,"asset_type":"日本株","shares":sh,"avg_cost":ac,"currency":"JPY"})
+                            if recs:
+                                df_imp = pd.DataFrame(recs)
+                                break
+                        else:
+                            df_imp = pd.read_csv(_io.StringIO(raw))
+                            break
+                    except Exception: continue
                 if df_imp is None or df_imp.empty:
                     st.warning("データが見つかりませんでした")
                 else:
