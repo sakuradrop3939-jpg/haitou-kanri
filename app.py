@@ -464,7 +464,7 @@ def tab_manage_holdings():
         uploaded = st.file_uploader("CSVを選択", type=["csv"])
         if uploaded:
             try:
-                                try:
+                try:
                     df_imp = pd.read_csv(uploaded, encoding="utf-8-sig")
                 except UnicodeDecodeError:
                     uploaded.seek(0)
