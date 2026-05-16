@@ -102,11 +102,11 @@ def tab_dashboard():
     total_cost = total_value = total_annual_div = 0.0
     rows = []
     for _, row in holdings.iterrows():
-        t       = row["ticker"]
-        shares  = float(row["shares"])
-        avg_cost = float(row["avg_cost"])
-        cur     = row["currency"]
-        cur_jpy = prices_jpy.get(t, 0)
+        t        = row["ticker"]
+        shares   = float(row["shares"] or 0)
+        avg_cost = float(row["avg_cost"] or 0)
+        cur      = str(row.get("currency") or "JPY")
+        cur_jpy  = float(prices_jpy.get(t) or 0)
 
         cost_jpy  = avg_cost * (usd_jpy if cur == "USD" else 1) * shares
         value_jpy = cur_jpy * shares
@@ -205,10 +205,10 @@ def tab_portfolio():
         if sel_type != "全て" and row["asset_type"] != sel_type:
             continue
         t        = row["ticker"]
-        shares   = float(row["shares"])
-        avg_cost = float(row["avg_cost"])
-        cur      = row["currency"]
-        cur_jpy  = prices_jpy.get(t, 0)
+        shares   = float(row["shares"] or 0)
+        avg_cost = float(row["avg_cost"] or 0)
+        cur      = str(row.get("currency") or "JPY")
+        cur_jpy  = float(prices_jpy.get(t) or 0)
 
         cost_jpy     = avg_cost * (usd_jpy if cur == "USD" else 1)
         value_jpy    = cur_jpy * shares
