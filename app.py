@@ -243,7 +243,7 @@ def tab_portfolio():
     styled = df.style.format({
         "評価額(円)": "{:,.0f}", "評価損益(円)": "{:+,.0f}",
         "損益率": "{:+.1f}%", "配当利回り": "{:.2f}%", "保有株数": "{:,.0f}",
-    }).applymap(_style_gain, subset=["評価損益(円)", "損益率"])
+    }).map(_style_gain, subset=["評価損益(円)", "損益率"])
 
     st.dataframe(styled, use_container_width=True, height=420)
 
@@ -311,7 +311,7 @@ def tab_dividend_growth():
 
     fmt_dict = {c: "{:.1f}%" for c in rate_cols}
     fmt_dict.update({c: "{:.1f}" for c in div_cols if c in growth_df.columns})
-    styled = growth_df.style.format(fmt_dict, na_rep="—").applymap(
+    styled = growth_df.style.format(fmt_dict, na_rep="—").map(
         _color_rate, subset=rate_cols
     )
     st.dataframe(styled, use_container_width=True, height=400)
