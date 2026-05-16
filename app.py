@@ -71,12 +71,17 @@ def get_prices_jpy(holdings_df: pd.DataFrame, usd_jpy: float) -> dict:
     result = {}
     for _, row in holdings_df.iterrows():
         t = row["ticker"]
+        manual = float(row.get("manual_price") or 0)
         if needs_manual_price(row):
-            result[t] = float(row.get("manual_price") or 0)
-        elif t in prices_raw:
-            result[t] = prices_raw[t] * usd_jpy if row.get("currency") == "USD" else prices_raw[t]
+            result[t] = manual
         else:
-            result[t] = float(row.get("manual_price") or 0)
+            raw = prices_raw.get(t)
+            if raw is None or raw != raw:  # None or NaN
+                result[t] = manual
+            elif row.get("currency") == "USD":
+                result[t] = float(raw) * usd_jpy
+            else:
+                result[t] = float(raw)
     return result
 
 
