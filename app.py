@@ -473,7 +473,7 @@ def tab_manage_holdings():
                         ls = raw.splitlines()
                         hrow = None
                         for i, line in enumerate(ls):
-                            if "取得単価" in line and "株数" in line:
+                            if "取得単価" in line:
                                 hrow = i
                                 break
                         if hrow is not None:
