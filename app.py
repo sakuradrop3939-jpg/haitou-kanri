@@ -460,30 +460,51 @@ def tab_manage_holdings():
 
         st.divider()
         st.markdown("#### CSV一括インポート")
-        st.caption("ヘッダー: `ticker,name,asset_type,shares,avg_cost,currency`")
+        st.caption("SBI証券CSV または ticker,name,asset_type,shares,avg_cost,currency 形式")
         uploaded = st.file_uploader("CSVを選択", type=["csv"])
         if uploaded:
             try:
-                try:
-                    df_imp = pd.read_csv(uploaded, encoding="utf-8-sig")
-                except UnicodeDecodeError:
-                    uploaded.seek(0)
-                    df_imp = pd.read_csv(uploaded, encoding="shift-jis")
-                st.dataframe(df_imp)
-                if st.button("インポート実行"):
-                    for _, r in df_imp.iterrows():
-                        db.upsert_holding(
-                            str(r["ticker"]).strip().upper(),
-                            str(r.get("name", r["ticker"])),
-                            str(r.get("asset_type", "日本株")),
-                            float(r.get("shares", 0)),
-                            float(r.get("avg_cost", 0)),
-                            str(r.get("currency", "JPY")),
-                            float(r.get("manual_price", 0)),
-                            str(r.get("notes", "")),
-                        )
-                    st.success(f"{len(df_imp)} 件インポートしました。")
-                    st.rerun()
+                import io as _io
+                def _parse_csv(f):
+                    for enc in ["utf-8-sig", "cp932", "shift-jis"]:
+                        try:
+                            f.seek(0)
+                            raw = f.read().decode(enc)
+                            ls = raw.splitlines()
+                            hrow = None
+                            for i, line in enumerate(ls):
+                                if "取得単価" in line and "株数" in line:
+                                    hrow = i
+                                    break
+                            if hrow is not None:
+                                df = pd.read_csv(_io.StringIO(raw), skiprows=hrow, dtype=str, on_bad_lines="skip")
+                                recs = []
+                                for _, row in df.iterrows():
+                                    c0 = str(row.iloc[0]).strip()
+                                    if not c0 or c0=="nan" or not c0[:1].isdigit(): continue
+                                    pts = c0.split(None, 1)
+                                    code = pts[0].strip()
+                                    name = pts[1].strip() if len(pts)>1 else code
+                                    try:
+                                        sh = float(str(row.iloc[2]).replace(",",""))
+                                        ac = float(str(row.iloc[3]).replace(",",""))
+                                    except: continue
+                                    recs.append({"ticker":code+".T","name":name,"asset_type":"日本株","shares":sh,"avg_cost":ac,"currency":"JPY"})
+                                return pd.DataFrame(recs)
+                            else:
+                                return pd.read_csv(_io.StringIO(raw))
+                        except UnicodeDecodeError: continue
+                    raise ValueError("文字コード判定失敗")
+                df_imp = _parse_csv(uploaded)
+                if df_imp.empty:
+                    st.warning("データが見つかりませんでした")
+                else:
+                    st.dataframe(df_imp)
+                    if st.button("インポート実行"):
+                        for _, r in df_imp.iterrows():
+                            db.upsert_holding(str(r["ticker"]).strip().upper(),str(r.get("name",r["ticker"])),str(r.get("asset_type","日本株")),float(r.get("shares",0)),float(r.get("avg_cost",0)),str(r.get("currency","JPY")),float(r.get("manual_price",0)),str(r.get("notes","")))
+                        st.success(f"{len(df_imp)} 件インポートしました。")
+                        st.rerun()
             except Exception as e:
                 st.error(f"読み込みエラー: {e}")
 
