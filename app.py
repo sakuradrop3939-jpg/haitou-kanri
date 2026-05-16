@@ -466,7 +466,7 @@ def tab_manage_holdings():
             try:
                 import io as _io
                 def _parse_csv(f):
-                    for enc in ["utf-8-sig", "cp932", "shift-jis"]:
+                    for enc in ["cp932", "shift-jis", "utf-8-sig", "utf-8"]:
                         try:
                             f.seek(0)
                             raw = f.read().decode(enc)
@@ -491,10 +491,13 @@ def tab_manage_holdings():
                                     except: continue
                                     recs.append({"ticker":code+".T","name":name,"asset_type":"日本株","shares":sh,"avg_cost":ac,"currency":"JPY"})
                                 return pd.DataFrame(recs)
-                            else:
-                                return pd.read_csv(_io.StringIO(raw))
                         except UnicodeDecodeError: continue
-                    raise ValueError("文字コード判定失敗")
+                    for enc in ["utf-8-sig", "cp932", "shift-jis"]:
+                        try:
+                            f.seek(0)
+                            return pd.read_csv(f, encoding=enc)
+                        except UnicodeDecodeError: continue
+                    raise ValueError("読み込み失敗")
                 df_imp = _parse_csv(uploaded)
                 if df_imp.empty:
                     st.warning("データが見つかりませんでした")
