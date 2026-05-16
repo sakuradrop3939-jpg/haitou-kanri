@@ -74,6 +74,8 @@ def _read_sheet(name: str) -> pd.DataFrame:
     for col in NUMERIC_COLS.get(name, []):
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+    if "ticker" in df.columns:
+        df["ticker"] = df["ticker"].astype(str)
     return df
 
 
@@ -231,6 +233,8 @@ def get_div_pivot() -> pd.DataFrame:
     df = get_div_history()
     if df.empty:
         return pd.DataFrame()
+    if "ticker" in df.columns:
+        df["ticker"] = df["ticker"].astype(str)
     return df.pivot_table(
         index="ticker", columns="fiscal_year", values="dps", aggfunc="last"
     )
