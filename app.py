@@ -460,7 +460,7 @@ def tab_manage_holdings():
 
         st.divider()
         st.markdown("#### CSV一括インポート")
-        st.caption("SBI証券CSV または ticker,name,asset_type,shares,avg_cost,currency 形式")
+        st.caption("SBI証券・楽天証券CSV または ticker,name,asset_type,shares,avg_cost,currency 形式")
         uploaded = st.file_uploader("CSVを選択", type=["csv"])
         if uploaded:
             try:
@@ -472,33 +472,65 @@ def tab_manage_holdings():
                         raw = raw_bytes.decode(enc)
                         ls = raw.splitlines()
                         hrow = None
+                        is_rakuten = False
                         for i, line in enumerate(ls):
-                            if "取得単価" in line:
+                            if "保有" in line and "取得" in line:
                                 hrow = i
+                                is_rakuten = True
+                                break
+                            elif "取得単価" in line:
+                                hrow = i
+                                is_rakuten = False
                                 break
                         if hrow is not None:
                             reader = _csv.reader(ls[hrow:])
                             next(reader)
                             recs = []
                             for row in reader:
-                                if not row or not row[0].strip(): continue
-                                c0 = row[0].strip()
-                                if not c0 or not c0[0].isdigit(): continue
-                                pts = c0.split(None, 1)
-                                code = pts[0].strip()
-                                name = pts[1].strip() if len(pts)>1 else code
+                                if not row or not any(r.strip() for r in row): continue
                                 try:
-                                    sh = float(str(row[2]).replace(",",""))
-                                    ac = float(str(row[3]).replace(",",""))
-                                except: continue
-                                recs.append({"ticker":code+".T","name":name,"asset_type":"日本株","shares":sh,"avg_cost":ac,"currency":"JPY"})
+                                    if is_rakuten:
+                                        code = str(row[1]).strip()
+                                        name = str(row[2]).strip()
+                                        if not name or name == "nan": continue
+                                        sh = float(str(row[4]).replace(",",""))
+                                        ac = float(str(row[6]).replace(",",""))
+                                        if sh <= 0 or ac <= 0: continue
+                                        if code and code.isdigit() and len(code) <= 4:
+                                            ticker = code + ".T"
+                                            atype = "日本株"
+                                        elif code and code.strip():
+                                            ticker = code
+                                            atype = "外国株"
+                                        else:
+                                            continue
+                                    else:
+                                        c0 = str(row[0]).strip()
+                                        if not c0 or c0 == "nan": continue
+                                        pts = c0.split(None, 1)
+                                        if not pts: continue
+                                        code = pts[0].strip()
+                                        name = pts[1].strip() if len(pts)>1 else code
+                                        sh = float(str(row[2]).replace(",",""))
+                                        ac = float(str(row[3]).replace(",",""))
+                                        if sh <= 0 or ac <= 0: continue
+                                        if len(code) <= 4 and code.isdigit():
+                                            ticker = code + ".T"
+                                            atype = "日本株"
+                                        elif code.isdigit():
+                                            ticker = code
+                                            atype = "投資信託"
+                                        else:
+                                            continue
+                                except Exception: continue
+                                recs.append({"ticker":ticker,"name":name,"asset_type":atype,"shares":sh,"avg_cost":ac,"currency":"JPY"})
                             if recs:
                                 df_imp = pd.DataFrame(recs)
                                 break
                         else:
                             df_imp = pd.read_csv(_io.StringIO(raw))
                             break
-                    except Exception: continue
+                    except UnicodeDecodeError: continue
                 if df_imp is None or df_imp.empty:
                     st.warning("データが見つかりませんでした")
                 else:
