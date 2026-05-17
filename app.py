@@ -480,7 +480,6 @@ def tab_manage_holdings():
                                 break
                             elif "取得単価" in line:
                                 hrow = i
-                                is_rakuten = False
                                 break
                         if hrow is not None:
                             reader = _csv.reader(ls[hrow:])
@@ -502,8 +501,7 @@ def tab_manage_holdings():
                                         elif code and code.strip():
                                             ticker = code
                                             atype = "外国株"
-                                        else:
-                                            continue
+                                        else: continue
                                     else:
                                         c0 = str(row[0]).strip()
                                         if not c0 or c0 == "nan": continue
@@ -520,8 +518,7 @@ def tab_manage_holdings():
                                         elif code.isdigit():
                                             ticker = code
                                             atype = "投資信託"
-                                        else:
-                                            continue
+                                        else: continue
                                 except Exception: continue
                                 recs.append({"ticker":ticker,"name":name,"asset_type":atype,"shares":sh,"avg_cost":ac,"currency":"JPY"})
                             if recs:
@@ -537,20 +534,19 @@ def tab_manage_holdings():
                     st.dataframe(df_imp)
                     merge_mode = st.checkbox("既存データに追加する（同じ銘柄は株数を合算）", value=True)
                     if st.button("インポート実行"):
+                        existing = db.get_holdings()
                         for _, r in df_imp.iterrows():
-                        ticker = str(r["ticker"]).strip().upper()
-                        if merge_mode:
-                            ex = db.get_holdings()
-                            ex_row = ex[ex["ticker"] == ticker]
+                            ticker = str(r["ticker"]).strip().upper()
+                            ex_row = existing[existing["ticker"] == ticker] if merge_mode and not existing.empty else pd.DataFrame()
                             if not ex_row.empty:
                                 er = ex_row.iloc[0]
                                 old_sh = float(er["shares"]); old_ac = float(er["avg_cost"])
                                 new_sh = float(r.get("shares",0)); new_ac = float(r.get("avg_cost",0))
                                 total_sh = old_sh + new_sh
-                                merged_ac = (old_sh*old_ac + new_sh*new_ac)/total_sh if total_sh>0 else new_ac
-                                db.upsert_holding(ticker,str(er["name"]),str(er["asset_type"]),total_sh,merged_ac,str(er["currency"]),float(er.get("manual_price",0)),str(er.get("notes","")))
-                                continue
-                        db.upsert_holding(ticker,str(r.get("name",ticker)),str(r.get("asset_type","日本株")),float(r.get("shares",0)),float(r.get("avg_cost",0)),str(r.get("currency","JPY")),float(r.get("manual_price",0)),str(r.get("notes","")))
+                                mac = (old_sh*old_ac + new_sh*new_ac)/total_sh if total_sh>0 else new_ac
+                                db.upsert_holding(ticker,str(er["name"]),str(er["asset_type"]),total_sh,mac,str(er["currency"]),float(er.get("manual_price",0)),str(er.get("notes","")))
+                            else:
+                                db.upsert_holding(ticker,str(r.get("name",ticker)),str(r.get("asset_type","日本株")),float(r.get("shares",0)),float(r.get("avg_cost",0)),str(r.get("currency","JPY")),float(r.get("manual_price",0)),str(r.get("notes","")))
                         st.success(f"{len(df_imp)} 件インポートしました。")
                         st.rerun()
             except Exception as e:
