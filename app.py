@@ -421,7 +421,7 @@ def tab_manage_holdings():
         else:
             st.dataframe(holdings, use_container_width=True, height=300)
             st.markdown("#### 銘柄を削除")
-            options = holdings["ticker"].tolist()
+            options = holdings["ticker"].unique().tolist()
             del_t = st.selectbox("削除する銘柄", options,
                                  format_func=lambda t: f"{t}（{holdings.loc[holdings['ticker']==t,'name'].values[0]}）",
                                  key="del_select")
@@ -452,10 +452,14 @@ def tab_manage_holdings():
             if not new_ticker or not new_name:
                 st.error("ティッカーと銘柄名は必須です。")
             else:
-                db.upsert_holding(new_ticker.strip().upper(), new_name,
-                                  new_type, new_shares, new_avg_cost,
+                t = new_ticker.strip().upper()
+                # 日本株の4桁コードは .T を自動付与（価格取得¥0対策）
+                if new_type == "日本株" and not t.endswith(".T") and t[:1].isdigit():
+                    t += ".T"
+                db.upsert_holding(t, new_name, new_type, "手動",
+                                  new_shares, new_avg_cost,
                                   new_currency, new_manual, new_notes)
-                st.success(f"{new_ticker.strip().upper()}（{new_name}）を登録しました。")
+                st.success(f"{t}（{new_name}）を登録しました。")
                 st.rerun()
 
         st.divider()
@@ -467,6 +471,7 @@ def tab_manage_holdings():
                 import io as _io, csv as _csv
                 raw_bytes = uploaded.getvalue()
                 df_imp = None
+                broker_name = "CSV"
                 for enc in ["cp932", "shift-jis", "utf-8-sig", "utf-8"]:
                     try:
                         raw = raw_bytes.decode(enc)
@@ -500,7 +505,7 @@ def tab_manage_holdings():
                                             atype = "日本株"
                                         elif code and code.strip():
                                             ticker = code
-                                            atype = "外国株"
+                                            atype = "米国株"
                                         else: continue
                                     else:
                                         c0 = str(row[0]).strip()
@@ -523,6 +528,7 @@ def tab_manage_holdings():
                                 recs.append({"ticker":ticker,"name":name,"asset_type":atype,"shares":sh,"avg_cost":ac,"currency":"JPY"})
                             if recs:
                                 df_imp = pd.DataFrame(recs)
+                                broker_name = "楽天証券" if is_rakuten else "SBI証券"
                                 break
                         else:
                             df_imp = pd.read_csv(_io.StringIO(raw))
@@ -532,21 +538,20 @@ def tab_manage_holdings():
                     st.warning("データが見つかりませんでした")
                 else:
                     st.dataframe(df_imp)
-                    merge_mode = st.checkbox("既存データに追加する（同じ銘柄は株数を合算）", value=True)
+                    st.caption(f"取込元: {broker_name}（{len(df_imp)}件）")
+                    replace_mode = st.checkbox(
+                        f"{broker_name} の既存データを置き換える（再インポートしても二重登録されません）",
+                        value=True)
                     if st.button("インポート実行"):
-                        existing = db.get_holdings()
+                        if replace_mode:
+                            db.delete_broker_holdings(broker_name)
                         for _, r in df_imp.iterrows():
                             ticker = str(r["ticker"]).strip().upper()
-                            ex_row = existing[existing["ticker"] == ticker] if merge_mode and not existing.empty else pd.DataFrame()
-                            if not ex_row.empty:
-                                er = ex_row.iloc[0]
-                                old_sh = float(er["shares"]); old_ac = float(er["avg_cost"])
-                                new_sh = float(r.get("shares",0)); new_ac = float(r.get("avg_cost",0))
-                                total_sh = old_sh + new_sh
-                                mac = (old_sh*old_ac + new_sh*new_ac)/total_sh if total_sh>0 else new_ac
-                                db.upsert_holding(ticker,str(er["name"]),str(er["asset_type"]),total_sh,mac,str(er["currency"]),float(er.get("manual_price",0)),str(er.get("notes","")))
-                            else:
-                                db.upsert_holding(ticker,str(r.get("name",ticker)),str(r.get("asset_type","日本株")),float(r.get("shares",0)),float(r.get("avg_cost",0)),str(r.get("currency","JPY")),float(r.get("manual_price",0)),str(r.get("notes","")))
+                            db.upsert_holding(
+                                ticker, str(r.get("name", ticker)),
+                                str(r.get("asset_type", "日本株")), broker_name,
+                                float(r.get("shares", 0)), float(r.get("avg_cost", 0)),
+                                str(r.get("currency", "JPY")), 0, "")
                         st.success(f"{len(df_imp)} 件インポートしました。")
                         st.rerun()
             except Exception as e:
@@ -570,7 +575,7 @@ def tab_transactions():
         with st.form("txn_form", clear_on_submit=True):
             c1, c2 = st.columns(2)
             with c1:
-                txn_t    = st.selectbox("銘柄", holdings["ticker"].tolist(),
+                txn_t    = st.selectbox("銘柄", holdings["ticker"].unique().tolist(),
                                         format_func=lambda t: f"{t}（{holdings.loc[holdings['ticker']==t,'name'].values[0]}）")
                 txn_type = st.radio("売買区分", ["買い", "売り"], horizontal=True)
                 txn_date = st.date_input("取引日", value=date.today())
@@ -588,7 +593,7 @@ def tab_transactions():
             else:
                 db.add_transaction(txn_t, str(txn_date), txn_type,
                                    txn_shares, txn_price, txn_fee,
-                                   txn_currency, txn_notes)
+                                   txn_currency, notes=txn_notes)
                 st.success(f"{txn_t} {txn_type} {txn_shares}株 @ {txn_price} を記録しました。")
                 st.rerun()
 
@@ -619,7 +624,7 @@ def tab_dividends_recv():
         with st.form("div_form", clear_on_submit=True):
             c1, c2 = st.columns(2)
             with c1:
-                div_t    = st.selectbox("銘柄", holdings["ticker"].tolist(),
+                div_t    = st.selectbox("銘柄", holdings["ticker"].unique().tolist(),
                                         format_func=lambda t: f"{t}（{holdings.loc[holdings['ticker']==t,'name'].values[0]}）",
                                         key="div_ticker")
                 div_date = st.date_input("受取日", value=date.today(), key="div_date")
@@ -676,7 +681,7 @@ def tab_manual_div_history():
     with st.form("manual_div_form", clear_on_submit=True):
         c1, c2, c3 = st.columns(3)
         with c1:
-            man_t = st.selectbox("銘柄", holdings["ticker"].tolist(),
+            man_t = st.selectbox("銘柄", holdings["ticker"].unique().tolist(),
                                  format_func=lambda t: f"{t}（{holdings.loc[holdings['ticker']==t,'name'].values[0]}）")
         with c2:
             man_fy = st.text_input("会計年度", placeholder="例: FY25 / 2025")
