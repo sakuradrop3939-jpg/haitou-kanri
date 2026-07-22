@@ -92,6 +92,22 @@ def _new_id() -> str:
     return datetime.now().strftime("%Y%m%d%H%M%S%f")
 
 
+def _pad_body(rows, width, old_row_count):
+    """各行を width 列に揃え、元の行数まで空行で埋める。
+
+    clear() せずに1回のupdateで上書きしきるためのヘルパー。
+    （clear+updateの2回書き込みは、途中で失敗するとデータが消える危険がある）
+    """
+    body = []
+    for r in rows:
+        r = [("" if c is None else c) for c in list(r)[:width]]
+        r += [""] * (width - len(r))
+        body.append(r)
+    while len(body) < old_row_count:
+        body.append([""] * width)
+    return body
+
+
 def _migrate_holdings_sheet():
     """broker列がなければholdingsシートをリセット"""
     ws = _get_ws("holdings")
@@ -213,6 +229,52 @@ def delete_holding(ticker, broker=None):
     _clear_cache()
 
 
+def bulk_upsert_holdings(broker: str, records, replace: bool = True):
+    """CSVインポート用の一括書き込み。
+
+    1件ずつ upsert すると (全行読み込み+書き込み) × 件数 で Sheets API の
+    クォータ(読み取り60回/分)を超えるため、読み1回・書き2回にまとめる。
+
+    replace=True  : 指定brokerの既存行をすべて置き換える
+    replace=False : 同一 (ticker, broker) の行だけ差し替え、他は残す
+    """
+    ws = _get_ws("holdings")
+    all_vals = ws.get_all_values()
+    headers = all_vals[0] if all_vals else list(HEADERS["holdings"])
+    try:
+        tcol = headers.index("ticker")
+        bcol = headers.index("broker")
+    except ValueError:
+        tcol, bcol = 0, 3
+
+    incoming = {str(r["ticker"]).strip() for r in records}
+    kept = []
+    for row in all_vals[1:]:
+        if not row or not any(str(c).strip() for c in row):
+            continue
+        is_target_broker = len(row) > bcol and row[bcol] == broker
+        if is_target_broker:
+            if replace:
+                continue
+            if len(row) > tcol and row[tcol] in incoming:
+                continue
+        kept.append(row)
+
+    new_rows = [[
+        str(r["ticker"]).strip(), str(r.get("name", r["ticker"])),
+        str(r.get("asset_type", "日本株")), broker,
+        float(r.get("shares", 0)), float(r.get("avg_cost", 0)),
+        str(r.get("currency", "JPY")), float(r.get("manual_price") or 0),
+        str(r.get("notes", "")),
+    ] for r in records]
+
+    body = _pad_body([list(HEADERS["holdings"])] + kept + new_rows,
+                     len(HEADERS["holdings"]), len(all_vals))
+    ws.update(values=body, range_name="A1")
+    _clear_cache()
+    return len(new_rows)
+
+
 def delete_broker_holdings(broker: str):
     """指定した証券会社の全保有銘柄を削除"""
     ws = _get_ws("holdings")
@@ -304,6 +366,32 @@ def upsert_div_history(ticker, fiscal_year, dps, source="yfinance"):
     else:
         ws.append_row(new_row)
     _clear_cache()
+
+
+def bulk_upsert_div_history(entries):
+    """配当履歴の一括書き込み。entries: [(ticker, fiscal_year, dps, source), ...]
+
+    1件ずつ upsert すると銘柄×年度の回数だけAPIを叩きクォータを超過するため、
+    読み1回・書き2回にまとめる。
+    """
+    if not entries:
+        return 0
+    ws = _get_ws("div_history")
+    all_vals = ws.get_all_values()
+    merged = {}
+    for row in all_vals[1:]:
+        if len(row) >= 2 and str(row[0]).strip():
+            r = list(row[:4])
+            r += [""] * (4 - len(r))
+            merged[(r[0], r[1])] = r
+    for ticker, fy, dps, source in entries:
+        merged[(ticker, fy)] = [ticker, fy, float(dps), source]
+
+    body = _pad_body([list(HEADERS["div_history"])] + list(merged.values()),
+                     len(HEADERS["div_history"]), len(all_vals))
+    ws.update(values=body, range_name="A1")
+    _clear_cache()
+    return len(entries)
 
 
 def get_div_history() -> pd.DataFrame:

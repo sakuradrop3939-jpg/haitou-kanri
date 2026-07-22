@@ -447,26 +447,32 @@ def tab_dividend_growth():
 
 
 def _fetch_and_store_dividends(holdings: pd.DataFrame):
+    """配当データを取得してGoogleシートへ一括書き込みする。
+
+    ループ内でシートに書くとAPIクォータを超過するため、すべてメモリに集めてから
+    最後に1回だけ書き込む。
+    """
+    entries = {}   # (ticker, fiscal_year) -> (dps, source)
+    jp_tickers = []
     for _, row in holdings.iterrows():
         t, atype = row["ticker"], row["asset_type"]
-        if atype == "投資信託": continue
-        hist = fetcher.get_annual_dividends(t)
-        for fy, dps in hist.items():
-            db.upsert_div_history(t, fy, dps, source="yfinance")
-        if t.endswith(".T"):
-            code     = t.replace(".T", "")
-            forecast = fetcher.fetch_kabutan_forecast(code)
-            existing = db.get_div_history()
-            for fy, dps in forecast.items():
-                if not existing.empty:
-                    has_actual = not existing[
-                        (existing["ticker"] == t) &
-                        (existing["fiscal_year"] == fy) &
-                        (existing["source"] == "yfinance")
-                    ].empty
-                    if has_actual: continue
-                db.upsert_div_history(t, fy, dps, source="kabutan")
-            time.sleep(0.4)
+        if atype == "投資信託":
+            continue
+        for fy, dps in fetcher.get_annual_dividends(t).items():
+            entries[(t, fy)] = (dps, "yfinance")
+        if str(t).endswith(".T"):
+            jp_tickers.append(t)
+
+    for t in jp_tickers:
+        forecast = fetcher.fetch_kabutan_forecast(str(t).replace(".T", ""))
+        for fy, dps in forecast.items():
+            # yfinanceの実績があれば予想で上書きしない
+            if (t, fy) not in entries:
+                entries[(t, fy)] = (dps, "kabutan")
+        time.sleep(0.4)
+
+    db.bulk_upsert_div_history(
+        [(t, fy, dps, src) for (t, fy), (dps, src) in entries.items()])
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -691,20 +697,25 @@ def tab_manage_holdings():
                         f"{broker_name} の既存データを置き換える（再インポートしても二重登録されません）",
                         value=True)
                     if st.button("インポート実行", type="primary"):
-                        if replace_mode:
-                            db.delete_broker_holdings(broker_name)
+                        records = []
                         for _, r in df_imp.iterrows():
                             ticker = str(r["ticker"]).strip()
                             if re.fullmatch(r"[A-Za-z0-9.]+", ticker):
                                 ticker = ticker.upper()
-                            db.upsert_holding(
-                                ticker, str(r.get("name", ticker)),
-                                str(r.get("asset_type", "日本株")), broker_name,
-                                float(r.get("shares", 0)), float(r.get("avg_cost", 0)),
-                                str(r.get("currency", "JPY")),
-                                float(r.get("manual_price", 0)), "")
+                            records.append({
+                                "ticker": ticker,
+                                "name": str(r.get("name", ticker)),
+                                "asset_type": str(r.get("asset_type", "日本株")),
+                                "shares": float(r.get("shares", 0)),
+                                "avg_cost": float(r.get("avg_cost", 0)),
+                                "currency": str(r.get("currency", "JPY")),
+                                "manual_price": float(r.get("manual_price", 0) or 0),
+                            })
+                        with st.spinner("インポート中..."):
+                            n = db.bulk_upsert_holdings(
+                                broker_name, records, replace=replace_mode)
                         st.cache_data.clear()
-                        st.success(f"{len(df_imp)} 件インポートしました。")
+                        st.success(f"{n} 件インポートしました。")
                         st.rerun()
             except Exception as e:
                 st.error(f"読み込みエラー: {e}")
