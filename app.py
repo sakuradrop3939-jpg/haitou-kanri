@@ -33,14 +33,43 @@ st.set_page_config(
 st.markdown("""
 <style>
   html, body, [class*="css"] { font-family: "Noto Sans JP", sans-serif; }
+
+  /* 全体の文字を大きめに */
+  .stMarkdown p, .stMarkdown li, .stMarkdown label { font-size: 17px; }
+  h1 { font-size: 32px !important; }
+  h2 { font-size: 26px !important; }
+  h3 { font-size: 21px !important; }
+
+  /* タブ */
   .stTabs [data-baseweb="tab-list"] { gap: 4px; flex-wrap: wrap; }
   .stTabs [data-baseweb="tab"] {
-      height: 44px; padding: 0 12px;
-      font-size: 13px; font-weight: 600;
+      height: 48px; padding: 0 16px;
+      font-size: 16px; font-weight: 600;
   }
+
+  /* メトリクス（総資産などの数字） */
+  [data-testid="stMetricLabel"] p { font-size: 16px !important; }
+  [data-testid="stMetricValue"] { font-size: 32px !important; }
+  [data-testid="stMetricDelta"] { font-size: 15px !important; }
+
+  /* 注釈・キャプション */
+  [data-testid="stCaptionContainer"] p { font-size: 14px !important; }
+
+  /* 入力まわり */
+  .stSelectbox label, .stNumberInput label, .stTextInput label,
+  .stDateInput label, .stRadio label, .stCheckbox label { font-size: 16px !important; }
+  .stButton button { font-size: 16px; padding: 0.5rem 1.1rem; }
+
   .stDataFrame { overflow-x: auto; }
   .pos { color: #00c853; font-weight: bold; }
   .neg { color: #d32f2f; font-weight: bold; }
+
+  /* スマホ */
+  @media (max-width: 640px) {
+    [data-testid="stMetricValue"] { font-size: 26px !important; }
+    .stTabs [data-baseweb="tab"] { font-size: 15px; padding: 0 12px; }
+    .stMarkdown p, .stMarkdown li { font-size: 16px; }
+  }
 </style>
 """, unsafe_allow_html=True)
 
