@@ -102,10 +102,18 @@ def _migrate_holdings_sheet():
         _clear_cache()
 
 
+@st.cache_resource
 def init_db():
-    for name in HEADERS:
-        _get_ws(name)
-    _migrate_holdings_sheet()
+    """シート初期化。毎rerunで走るとSheets APIを浪費するため1回だけ実行する。
+    一時的なAPIエラー（クォータ超過等）でアプリ全体が落ちないよう握りつぶす
+    （各read関数はリトライ＋空DataFrameのフォールバックを持つ）。"""
+    try:
+        for name in HEADERS:
+            _get_ws(name)
+        _migrate_holdings_sheet()
+    except Exception:
+        pass
+    return True
 
 
 # ─── Holdings ────────────────────────────────────────────────────────────────
