@@ -52,9 +52,6 @@ db.init_db()
 ASSET_TYPES = ["日本株", "米国株", "米国ETF", "債券", "投資信託", "その他"]
 CURRENCIES  = ["JPY", "USD"]
 
-# 配当データを自動再取得する間隔（日）。配当は年数回しか変わらないため長め。
-DIV_REFRESH_DAYS = 7
-
 
 def fmt_jpy(v) -> str:
     if pd.isna(v) or v is None: return "—"
@@ -871,41 +868,10 @@ def tab_manual_div_history():
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# 自動更新（方式A: アプリ起動時に、配当データが古ければ自動取得）
-# ═══════════════════════════════════════════════════════════════════════════════
-def maybe_auto_refresh_dividends():
-    """配当データが DIV_REFRESH_DAYS 日以上古ければ自動取得する（セッション中1回）。"""
-    if st.session_state.get("_div_auto_checked"):
-        return
-    st.session_state["_div_auto_checked"] = True
-
-    holdings = db.get_holdings()
-    if holdings.empty:
-        return
-
-    last = db.get_meta("div_last_fetched")
-    need = True
-    if last:
-        try:
-            last_date = datetime.strptime(last, "%Y-%m-%d").date()
-            need = (date.today() - last_date).days >= DIV_REFRESH_DAYS
-        except ValueError:
-            need = True
-
-    if need:
-        with st.spinner("配当データを自動更新中...（初回は少し時間がかかります）"):
-            _fetch_and_store_dividends(holdings)
-            db.set_meta("div_last_fetched", date.today().isoformat())
-        st.cache_data.clear()
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
 # メイン
 # ═══════════════════════════════════════════════════════════════════════════════
 def main():
     st.title("📈 配当・資産管理アプリ")
-
-    maybe_auto_refresh_dividends()
 
     col_r, col_note = st.columns([1, 6])
     with col_r:
@@ -915,7 +881,7 @@ def main():
     with col_note:
         last = db.get_meta("div_last_fetched")
         if last:
-            st.caption(f"配当データ最終取得: {last}（{DIV_REFRESH_DAYS}日ごとに自動更新／株価は5分毎に自動）")
+            st.caption(f"配当データ最終取得: {last}　株価・評価額はアプリを開くたび自動更新（5分キャッシュ）")
 
     tabs = st.tabs([
         "📊 ダッシュボード",

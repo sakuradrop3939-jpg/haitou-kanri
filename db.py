@@ -350,11 +350,12 @@ def get_asset_history() -> pd.DataFrame:
 # ─── Meta（key-value: 最終取得日などの状態保存） ────────────────────────────
 
 def get_meta(key: str):
-    ws = _get_ws("meta")
-    for row in ws.get_all_values()[1:]:
-        if len(row) >= 2 and row[0] == key:
-            return row[1]
-    return None
+    """キャッシュ経由で読む（毎回のrerunでAPIを叩かないため）。"""
+    df = _read_sheet("meta")
+    if df.empty or "key" not in df.columns:
+        return None
+    hit = df[df["key"].astype(str) == key]
+    return str(hit.iloc[0]["value"]) if not hit.empty else None
 
 
 def set_meta(key: str, value: str):
