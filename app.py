@@ -13,6 +13,9 @@ import plotly.express as px
 import plotly.graph_objects as go
 from datetime import datetime, date
 import time
+import csv
+import re
+import io as _io
 
 import db
 import fetcher
@@ -48,6 +51,9 @@ db.init_db()
 # ═══════════════════════════════════════════════════════════════════════════════
 ASSET_TYPES = ["日本株", "米国株", "米国ETF", "債券", "投資信託", "その他"]
 CURRENCIES  = ["JPY", "USD"]
+
+# 配当データを自動再取得する間隔（日）。配当は年数回しか変わらないため長め。
+DIV_REFRESH_DAYS = 7
 
 
 def fmt_jpy(v) -> str:
@@ -113,8 +119,9 @@ def tab_dashboard():
         gain_jpy  = value_jpy - cost_jpy
         gain_pct  = (gain_jpy / cost_jpy * 100) if cost_jpy > 0 else 0
 
-        info    = fetcher.get_company_info(t)
-        fwd_div = float(info.get("forward_dividend") or 0)
+        # 投資信託等はyfinance非対応のため配当見込みは取得しない
+        fwd_div = 0.0 if needs_manual_price(row) else \
+            float(fetcher.get_company_info(t).get("forward_dividend") or 0)
         annual_div_jpy = fwd_div * (usd_jpy if cur == "USD" else 1) * shares
 
         total_cost       += cost_jpy
@@ -139,6 +146,46 @@ def tab_dashboard():
     c3.metric("年間配当見込み", fmt_jpy(total_annual_div))
     c4.metric("配当利回り（加重）", f"{div_yield:.2f}%")
     st.caption(f"USD/JPY: {usd_jpy:.2f}　最終更新: {datetime.now().strftime('%H:%M:%S')}（5分毎自動更新）")
+
+    # 1日1回だけ資産スナップショットを自動記録
+    snapshot_key = f"asset_snapshot_{date.today().isoformat()}"
+    if snapshot_key not in st.session_state:
+        db.record_asset_snapshot(date.today().isoformat(), total_value)
+        st.session_state[snapshot_key] = True
+
+    st.divider()
+
+    # ── 資産推移 ─────────────────────────────────────────────────────────
+    st.markdown("#### 📈 資産推移")
+    asset_hist = db.get_asset_history()
+    if not asset_hist.empty:
+        asset_hist = asset_hist.sort_values("date").reset_index(drop=True)
+        av = asset_hist["total_value_jpy"]
+        first_v, last_v = float(av.iloc[0]), float(av.iloc[-1])
+        prev_v  = float(av.iloc[-2]) if len(av) >= 2 else first_v
+        first_d = asset_hist["date"].iloc[0]
+
+        a1, a2, a3 = st.columns(3)
+        a1.metric("最新記録の総資産", fmt_jpy(last_v))
+        a2.metric("前回記録比", fmt_jpy(last_v - prev_v),
+                  delta=f"{(last_v - prev_v) / prev_v * 100:+.1f}%" if prev_v else None)
+        a3.metric(f"{first_d} 比", fmt_jpy(last_v - first_v),
+                  delta=f"{(last_v - first_v) / first_v * 100:+.1f}%" if first_v else None)
+
+        if len(av) > 1:
+            fig_hist = go.Figure(go.Scatter(
+                x=asset_hist["date"], y=av, mode="lines+markers",
+                line=dict(color="#1976D2", width=2.5), marker=dict(size=6),
+                fill="tozeroy", fillcolor="rgba(25,118,210,0.10)",
+                hovertemplate="%{x}<br>¥%{y:,.0f}<extra></extra>",
+            ))
+            fig_hist.update_layout(xaxis_title="", yaxis_title="総資産評価額(円)",
+                                   margin=dict(t=10, b=20, l=20, r=20), height=300)
+            st.plotly_chart(fig_hist, use_container_width=True)
+        else:
+            st.caption("記録が2日分以上たまると、ここに推移グラフが表示されます。")
+    else:
+        st.caption("アプリを開くたびに、その日の総資産が自動で記録されていきます。")
 
     st.divider()
 
@@ -215,8 +262,8 @@ def tab_portfolio():
         gain_jpy     = (cur_jpy - cost_jpy) * shares
         gain_pct     = ((cur_jpy - cost_jpy) / cost_jpy * 100) if cost_jpy > 0 else 0
 
-        info      = fetcher.get_company_info(t)
-        fwd_div   = float(info.get("forward_dividend") or 0)
+        fwd_div   = 0.0 if needs_manual_price(row) else \
+            float(fetcher.get_company_info(t).get("forward_dividend") or 0)
         cur_price = cur_jpy / usd_jpy if cur == "USD" else cur_jpy
         div_yield = (fwd_div / cur_price * 100) if cur_price > 0 else 0
 
@@ -268,6 +315,7 @@ def tab_dividend_growth():
         if st.button("📥 配当データを最新取得", type="primary"):
             with st.spinner("取得中...（しばらくお待ちください）"):
                 _fetch_and_store_dividends(holdings)
+                db.set_meta("div_last_fetched", date.today().isoformat())
             st.success("取得完了！")
             st.cache_data.clear()
             st.rerun()
@@ -326,6 +374,24 @@ def tab_dividend_growth():
         ticker_data = pivot.loc[sel].dropna()
         if not ticker_data.empty:
             yrs = ticker_data.index.tolist()
+
+            # ── サマリー指標（累積増配率・年平均・連続増配） ──
+            if len(yrs) > 1:
+                base_v, last_v = ticker_data[yrs[0]], ticker_data[yrs[-1]]
+                span = len(yrs) - 1
+                cum  = (last_v / base_v - 1) * 100 if base_v else None
+                cagr = ((last_v / base_v) ** (1 / span) - 1) * 100 if base_v and last_v > 0 else None
+                streak = 0
+                for i in range(len(yrs) - 1, 0, -1):
+                    if ticker_data[yrs[i]] > ticker_data[yrs[i - 1]]:
+                        streak += 1
+                    else:
+                        break
+                m1, m2, m3 = st.columns(3)
+                m1.metric(f"累積増配率（{yrs[0]}→{yrs[-1]}）", fmt_pct(cum))
+                m2.metric("年平均増配率（CAGR）", fmt_pct(cagr))
+                m3.metric("連続増配", f"{streak}年" if streak else "—")
+
             fig = go.Figure(go.Bar(
                 x=yrs, y=ticker_data.values.tolist(),
                 marker_color="#4CAF50",
@@ -341,7 +407,7 @@ def tab_dividend_growth():
                     f"{yrs[i]}: {fmt_pct(fetcher.calc_growth_rate(ticker_data[yrs[i]], ticker_data[yrs[i-1]]))}"
                     for i in range(1, len(yrs))
                 )
-                st.caption(f"増配率　{rates}")
+                st.caption(f"増配率（前年比）　{rates}")
 
     # ── 年間配当収入推移 ──────────────────────────────────────────────────
     st.divider()
@@ -407,6 +473,148 @@ def _fetch_and_store_dividends(holdings: pd.DataFrame):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# CSVインポート（SBI証券・楽天証券ポートフォリオCSV対応）
+# ═══════════════════════════════════════════════════════════════════════════════
+_CODE_RE = re.compile(r"^(\d{3,4}[A-Za-z0-9]?)[\s　]+(.+)$")
+_DATE_RE = re.compile(r"^(\d{4}/\d{2}/\d{2}|-+/-+/-+)$")
+
+
+def _num(s):
+    try:
+        return float(str(s).replace(",", "").strip())
+    except (ValueError, AttributeError):
+        return None
+
+
+def _add_stock(agg, ticker, name, atype, shares, avg_cost):
+    if ticker in agg:
+        agg[ticker]["shares"]   += shares
+        agg[ticker]["cost_sum"] += shares * avg_cost
+    else:
+        agg[ticker] = {"name": name, "atype": atype,
+                       "shares": shares, "cost_sum": shares * avg_cost}
+
+
+def _parse_one(raw_bytes, agg_stock, agg_fund):
+    """1ファイルを解析して agg_stock / agg_fund に加算。broker種別を返す。"""
+    for enc in ["cp932", "shift-jis", "utf-8-sig", "utf-8"]:
+        try:
+            raw = raw_bytes.decode(enc)
+        except UnicodeDecodeError:
+            continue
+
+        ls = raw.splitlines()
+        hrow = None
+        is_rakuten = False
+        for i, line in enumerate(ls):
+            if "保有" in line and "取得" in line:
+                hrow, is_rakuten = i, True
+                break
+            elif "取得単価" in line:
+                hrow = i
+                break
+
+        if hrow is None:
+            try:
+                return ("generic", pd.read_csv(_io.StringIO(raw)))
+            except Exception:
+                continue
+
+        for row in csv.reader(ls[hrow + 1:]):
+            if not row or not any(c.strip() for c in row):
+                continue
+
+            if is_rakuten:
+                try:
+                    code = str(row[1]).strip()
+                    name = str(row[2]).strip()
+                    if not name or name == "nan":
+                        continue
+                    sh, ac = _num(row[4]), _num(row[6])
+                    if sh is None or ac is None or sh <= 0 or ac <= 0:
+                        continue
+                    if code.isdigit() and len(code) <= 4:
+                        ticker, atype = code + ".T", "日本株"
+                    elif code:
+                        ticker, atype = code, "米国株"
+                    else:
+                        continue
+                except Exception:
+                    continue
+                _add_stock(agg_stock, ticker, name, atype, sh, ac)
+                continue
+
+            # ── SBI ──
+            if len(row) < 5:
+                continue
+            c0 = str(row[0]).strip()
+            if len(row) < 2 or not _DATE_RE.match(str(row[1]).strip()):
+                continue
+            m = _CODE_RE.match(c0)
+            if m:
+                sh, ac = _num(row[2]), _num(row[3])
+                if sh is None or ac is None or sh <= 0:
+                    continue
+                code = m.group(1)
+                ticker = (code + ".T") if (len(code) <= 4 and code.isdigit()) else code
+                _add_stock(agg_stock, ticker, m.group(2).strip(), "日本株", sh, ac)
+            else:
+                if len(row) < 10:
+                    continue
+                qty, value, gain = _num(row[2]), _num(row[9]), _num(row[7])
+                if qty is None or qty <= 0 or value is None:
+                    continue
+                cost = value - gain if gain is not None else value
+                if c0 in agg_fund:
+                    agg_fund[c0]["value"] += value
+                    agg_fund[c0]["cost"]  += cost
+                else:
+                    agg_fund[c0] = {"value": value, "cost": cost}
+
+        return ("楽天証券" if is_rakuten else "SBI証券", None)
+
+    return (None, None)
+
+
+def parse_broker_csv(raw_bytes_list):
+    """SBI証券・楽天証券のポートフォリオCSV（複数ファイル・複数ページ可）を解析する。
+
+    - 個別株: 特定/NISA など同一銘柄を合算（取得単価は加重平均）。
+    - 投資信託(SBI): 評価額・取得額を取り込み手動価格として登録。ファンド名で合算。
+    - 集計行・見出し行は自動スキップ。SBI/楽天形式でなければ汎用CSVとして読む。
+
+    戻り値: (DataFrame or None, broker_name)
+    """
+    agg_stock, agg_fund = {}, {}
+    broker_name = None
+    generic_df = None
+    for raw_bytes in raw_bytes_list:
+        broker, gdf = _parse_one(raw_bytes, agg_stock, agg_fund)
+        if broker == "generic":
+            generic_df = gdf if generic_df is None else generic_df
+        elif broker:
+            broker_name = broker
+
+    recs = []
+    for ticker, v in agg_stock.items():
+        avg = v["cost_sum"] / v["shares"] if v["shares"] else 0
+        recs.append({"ticker": ticker, "name": v["name"],
+                     "asset_type": v["atype"], "shares": v["shares"],
+                     "avg_cost": round(avg, 2), "currency": "JPY",
+                     "manual_price": 0})
+    for name, v in agg_fund.items():
+        recs.append({"ticker": name, "name": name, "asset_type": "投資信託",
+                     "shares": 1, "avg_cost": round(v["cost"], 2),
+                     "currency": "JPY", "manual_price": round(v["value"], 2)})
+
+    if recs:
+        return pd.DataFrame(recs), (broker_name or "SBI証券")
+    if generic_df is not None:
+        return generic_df, "CSV"
+    return None, "CSV"
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # タブ: 銘柄管理
 # ═══════════════════════════════════════════════════════════════════════════════
 def tab_manage_holdings():
@@ -464,94 +672,41 @@ def tab_manage_holdings():
 
         st.divider()
         st.markdown("#### CSV一括インポート")
-        st.caption("SBI証券・楽天証券CSV または ticker,name,asset_type,shares,avg_cost,currency 形式")
-        uploaded = st.file_uploader("CSVを選択", type=["csv"])
+        st.caption(
+            "SBI証券・楽天証券のポートフォリオCSV（数量・取得単価を自動判定、特定/NISAの"
+            "同一銘柄は合算、SBIは投資信託も取込）または "
+            "`ticker,name,asset_type,shares,avg_cost,currency` 形式に対応。"
+            "**ページが分かれている場合は全ページのCSVをまとめて選択してください。**"
+        )
+        uploaded = st.file_uploader(
+            "CSVを選択（複数可）", type=["csv"], accept_multiple_files=True)
         if uploaded:
             try:
-                import io as _io, csv as _csv
-                raw_bytes = uploaded.getvalue()
-                df_imp = None
-                broker_name = "CSV"
-                for enc in ["cp932", "shift-jis", "utf-8-sig", "utf-8"]:
-                    try:
-                        raw = raw_bytes.decode(enc)
-                        ls = raw.splitlines()
-                        hrow = None
-                        is_rakuten = False
-                        for i, line in enumerate(ls):
-                            if "保有" in line and "取得" in line:
-                                hrow = i
-                                is_rakuten = True
-                                break
-                            elif "取得単価" in line:
-                                hrow = i
-                                break
-                        if hrow is not None:
-                            reader = _csv.reader(ls[hrow:])
-                            next(reader)
-                            recs = []
-                            for row in reader:
-                                if not row or not any(r.strip() for r in row): continue
-                                try:
-                                    if is_rakuten:
-                                        code = str(row[1]).strip()
-                                        name = str(row[2]).strip()
-                                        if not name or name == "nan": continue
-                                        sh = float(str(row[4]).replace(",",""))
-                                        ac = float(str(row[6]).replace(",",""))
-                                        if sh <= 0 or ac <= 0: continue
-                                        if code and code.isdigit() and len(code) <= 4:
-                                            ticker = code + ".T"
-                                            atype = "日本株"
-                                        elif code and code.strip():
-                                            ticker = code
-                                            atype = "米国株"
-                                        else: continue
-                                    else:
-                                        c0 = str(row[0]).strip()
-                                        if not c0 or c0 == "nan": continue
-                                        pts = c0.split(None, 1)
-                                        if not pts: continue
-                                        code = pts[0].strip()
-                                        name = pts[1].strip() if len(pts)>1 else code
-                                        sh = float(str(row[2]).replace(",",""))
-                                        ac = float(str(row[3]).replace(",",""))
-                                        if sh <= 0 or ac <= 0: continue
-                                        if len(code) <= 4 and code.isdigit():
-                                            ticker = code + ".T"
-                                            atype = "日本株"
-                                        elif code.isdigit():
-                                            ticker = code
-                                            atype = "投資信託"
-                                        else: continue
-                                except Exception: continue
-                                recs.append({"ticker":ticker,"name":name,"asset_type":atype,"shares":sh,"avg_cost":ac,"currency":"JPY"})
-                            if recs:
-                                df_imp = pd.DataFrame(recs)
-                                broker_name = "楽天証券" if is_rakuten else "SBI証券"
-                                break
-                        else:
-                            df_imp = pd.read_csv(_io.StringIO(raw))
-                            break
-                    except UnicodeDecodeError: continue
+                df_imp, broker_name = parse_broker_csv([f.getvalue() for f in uploaded])
                 if df_imp is None or df_imp.empty:
-                    st.warning("データが見つかりませんでした")
+                    st.warning("銘柄データが見つかりませんでした。")
                 else:
-                    st.dataframe(df_imp)
-                    st.caption(f"取込元: {broker_name}（{len(df_imp)}件）")
+                    n_stock = int((df_imp["asset_type"] != "投資信託").sum()) if "asset_type" in df_imp else len(df_imp)
+                    n_fund  = int((df_imp["asset_type"] == "投資信託").sum()) if "asset_type" in df_imp else 0
+                    st.dataframe(df_imp, use_container_width=True)
+                    st.caption(f"取込元: {broker_name}（個別株 {n_stock}・投資信託 {n_fund}／特定・NISAは合算済み）")
                     replace_mode = st.checkbox(
                         f"{broker_name} の既存データを置き換える（再インポートしても二重登録されません）",
                         value=True)
-                    if st.button("インポート実行"):
+                    if st.button("インポート実行", type="primary"):
                         if replace_mode:
                             db.delete_broker_holdings(broker_name)
                         for _, r in df_imp.iterrows():
-                            ticker = str(r["ticker"]).strip().upper()
+                            ticker = str(r["ticker"]).strip()
+                            if re.fullmatch(r"[A-Za-z0-9.]+", ticker):
+                                ticker = ticker.upper()
                             db.upsert_holding(
                                 ticker, str(r.get("name", ticker)),
                                 str(r.get("asset_type", "日本株")), broker_name,
                                 float(r.get("shares", 0)), float(r.get("avg_cost", 0)),
-                                str(r.get("currency", "JPY")), 0, "")
+                                str(r.get("currency", "JPY")),
+                                float(r.get("manual_price", 0)), "")
+                        st.cache_data.clear()
                         st.success(f"{len(df_imp)} 件インポートしました。")
                         st.rerun()
             except Exception as e:
@@ -716,16 +871,51 @@ def tab_manual_div_history():
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# 自動更新（方式A: アプリ起動時に、配当データが古ければ自動取得）
+# ═══════════════════════════════════════════════════════════════════════════════
+def maybe_auto_refresh_dividends():
+    """配当データが DIV_REFRESH_DAYS 日以上古ければ自動取得する（セッション中1回）。"""
+    if st.session_state.get("_div_auto_checked"):
+        return
+    st.session_state["_div_auto_checked"] = True
+
+    holdings = db.get_holdings()
+    if holdings.empty:
+        return
+
+    last = db.get_meta("div_last_fetched")
+    need = True
+    if last:
+        try:
+            last_date = datetime.strptime(last, "%Y-%m-%d").date()
+            need = (date.today() - last_date).days >= DIV_REFRESH_DAYS
+        except ValueError:
+            need = True
+
+    if need:
+        with st.spinner("配当データを自動更新中...（初回は少し時間がかかります）"):
+            _fetch_and_store_dividends(holdings)
+            db.set_meta("div_last_fetched", date.today().isoformat())
+        st.cache_data.clear()
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # メイン
 # ═══════════════════════════════════════════════════════════════════════════════
 def main():
     st.title("📈 配当・資産管理アプリ")
 
-    col_r, _ = st.columns([1, 6])
+    maybe_auto_refresh_dividends()
+
+    col_r, col_note = st.columns([1, 6])
     with col_r:
         if st.button("🔄 データ更新"):
             st.cache_data.clear()
             st.rerun()
+    with col_note:
+        last = db.get_meta("div_last_fetched")
+        if last:
+            st.caption(f"配当データ最終取得: {last}（{DIV_REFRESH_DAYS}日ごとに自動更新／株価は5分毎に自動）")
 
     tabs = st.tabs([
         "📊 ダッシュボード",

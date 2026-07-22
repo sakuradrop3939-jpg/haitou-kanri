@@ -24,6 +24,8 @@ HEADERS = {
         "total_amount", "currency", "fiscal_year", "notes",
     ],
     "div_history": ["ticker", "fiscal_year", "dps", "source"],
+    "asset_history": ["date", "total_value_jpy"],
+    "meta": ["key", "value"],
 }
 
 NUMERIC_COLS = {
@@ -31,6 +33,7 @@ NUMERIC_COLS = {
     "transactions": ["shares", "price", "fee"],
     "dividends_received": ["amount_per_share", "total_amount"],
     "div_history": ["dps"],
+    "asset_history": ["total_value_jpy"],
 }
 
 
@@ -318,3 +321,52 @@ def get_div_pivot() -> pd.DataFrame:
     return df.pivot_table(
         index="ticker", columns="fiscal_year", values="dps", aggfunc="last"
     )
+
+
+# ─── Asset History（資産推移スナップショット） ──────────────────────────────
+
+def record_asset_snapshot(date_str: str, total_value_jpy: float):
+    """同じ日付の行があれば上書き、なければ追記する。"""
+    ws = _get_ws("asset_history")
+    all_vals = ws.get_all_values()
+    found_row = None
+    if len(all_vals) > 1:
+        for i, row in enumerate(all_vals[1:], start=2):
+            if len(row) >= 1 and row[0] == date_str:
+                found_row = i
+                break
+    new_row = [date_str, float(total_value_jpy)]
+    if found_row:
+        ws.update(f"A{found_row}:B{found_row}", [new_row])
+    else:
+        ws.append_row(new_row)
+    _clear_cache()
+
+
+def get_asset_history() -> pd.DataFrame:
+    return _read_sheet("asset_history")
+
+
+# ─── Meta（key-value: 最終取得日などの状態保存） ────────────────────────────
+
+def get_meta(key: str):
+    ws = _get_ws("meta")
+    for row in ws.get_all_values()[1:]:
+        if len(row) >= 2 and row[0] == key:
+            return row[1]
+    return None
+
+
+def set_meta(key: str, value: str):
+    ws = _get_ws("meta")
+    all_vals = ws.get_all_values()
+    found_row = None
+    for i, row in enumerate(all_vals[1:], start=2):
+        if len(row) >= 1 and row[0] == key:
+            found_row = i
+            break
+    if found_row:
+        ws.update(f"A{found_row}:B{found_row}", [[key, str(value)]])
+    else:
+        ws.append_row([key, str(value)])
+    _clear_cache()
