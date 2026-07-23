@@ -508,6 +508,8 @@ def _fetch_and_store_dividends(holdings: pd.DataFrame):
 # CSVインポート（SBI証券・楽天証券ポートフォリオCSV対応）
 # ═══════════════════════════════════════════════════════════════════════════════
 _CODE_RE = re.compile(r"^(\d{3,4}[A-Za-z0-9]?)[\s　]+(.+)$")
+# 米国株: 「AAPL アップル」のようにティッカー(半角英字)＋銘柄名
+_US_RE   = re.compile(r"^([A-Z]{1,5}(?:\.[A-Z])?)[\s　]+(.+)$")
 _DATE_RE = re.compile(r"^(\d{4}/\d{2}/\d{2}|-+/-+/-+)$")
 
 
@@ -518,12 +520,12 @@ def _num(s):
         return None
 
 
-def _add_stock(agg, ticker, name, atype, shares, avg_cost):
+def _add_stock(agg, ticker, name, atype, shares, avg_cost, currency="JPY"):
     if ticker in agg:
         agg[ticker]["shares"]   += shares
         agg[ticker]["cost_sum"] += shares * avg_cost
     else:
-        agg[ticker] = {"name": name, "atype": atype,
+        agg[ticker] = {"name": name, "atype": atype, "currency": currency,
                        "shares": shares, "cost_sum": shares * avg_cost}
 
 
@@ -583,13 +585,19 @@ def _parse_one(raw_bytes, agg_stock, agg_fund):
             if len(row) < 2 or not _DATE_RE.match(str(row[1]).strip()):
                 continue
             m = _CODE_RE.match(c0)
-            if m:
+            mu = None if m else _US_RE.match(c0)
+            if m or mu:
                 sh, ac = _num(row[2]), _num(row[3])
                 if sh is None or ac is None or sh <= 0:
                     continue
-                code = m.group(1)
-                ticker = (code + ".T") if (len(code) <= 4 and code.isdigit()) else code
-                _add_stock(agg_stock, ticker, m.group(2).strip(), "日本株", sh, ac)
+                if m:
+                    code = m.group(1)
+                    ticker = (code + ".T") if (len(code) <= 4 and code.isdigit()) else code
+                    _add_stock(agg_stock, ticker, m.group(2).strip(), "日本株", sh, ac)
+                else:
+                    # 米国株は取得単価・現在値ともUSD建て
+                    _add_stock(agg_stock, mu.group(1), mu.group(2).strip(),
+                               "米国株", sh, ac, currency="USD")
             else:
                 if len(row) < 10:
                     continue
@@ -632,7 +640,8 @@ def parse_broker_csv(raw_bytes_list):
         avg = v["cost_sum"] / v["shares"] if v["shares"] else 0
         recs.append({"ticker": ticker, "name": v["name"],
                      "asset_type": v["atype"], "shares": v["shares"],
-                     "avg_cost": round(avg, 2), "currency": "JPY",
+                     "avg_cost": round(avg, 2),
+                     "currency": v.get("currency", "JPY"),
                      "manual_price": 0})
     for name, v in agg_fund.items():
         recs.append({"ticker": name, "name": name, "asset_type": "投資信託",
@@ -649,6 +658,69 @@ def parse_broker_csv(raw_bytes_list):
 # ═══════════════════════════════════════════════════════════════════════════════
 # タブ: 銘柄管理
 # ═══════════════════════════════════════════════════════════════════════════════
+OTHER_BROKER  = "手動その他"
+OTHER_PRESETS = ["iDeCo", "外貨建MMF", "預り金(米ドル)", "スィープ専用銀行口座"]
+
+
+def tab_other_assets():
+    """CSVに出てこない資産（iDeCo・MMF・現金等）の残高を手入力する。"""
+    st.subheader("🏛️ その他資産（残高入力）")
+    st.caption(
+        "iDeCo・外貨建MMF・預り金・銀行口座など、証券CSVに含まれない資産を"
+        "残高だけ登録して総資産に反映します。SBIのCSVを再インポートしても消えません。"
+    )
+
+    holdings = db.get_holdings()
+    if not holdings.empty and "broker" in holdings.columns:
+        current = holdings[holdings["broker"] == OTHER_BROKER]
+    else:
+        current = pd.DataFrame()
+
+    if current.empty:
+        base = pd.DataFrame({"名称": OTHER_PRESETS,
+                             "評価額(円)": [0.0] * len(OTHER_PRESETS),
+                             "取得額(円)": [0.0] * len(OTHER_PRESETS)})
+    else:
+        base = pd.DataFrame({
+            "名称": current["name"].tolist(),
+            "評価額(円)": [float(v or 0) for v in current["manual_price"]],
+            "取得額(円)": [float(c or 0) for c in current["avg_cost"]],
+        })
+
+    st.markdown("#### 残高を入力")
+    st.caption("取得額が不明なら0のままでOK（評価損益は0として扱います）。行の追加・削除もできます。")
+    edited = st.data_editor(
+        base, num_rows="dynamic", use_container_width=True, key="other_editor",
+        column_config={
+            "名称": st.column_config.TextColumn("名称", required=True),
+            "評価額(円)": st.column_config.NumberColumn("評価額(円)", min_value=0.0, step=1000.0, format="%.0f"),
+            "取得額(円)": st.column_config.NumberColumn("取得額(円)", min_value=0.0, step=1000.0, format="%.0f"),
+        },
+    )
+
+    total_other = float(pd.to_numeric(edited["評価額(円)"], errors="coerce").fillna(0).sum())
+    st.markdown(f"**その他資産の合計: {fmt_jpy(total_other)}**")
+
+    if st.button("保存する", type="primary"):
+        records = []
+        for _, r in edited.iterrows():
+            nm = str(r.get("名称") or "").strip()
+            val = float(pd.to_numeric(r.get("評価額(円)"), errors="coerce") or 0)
+            cost = float(pd.to_numeric(r.get("取得額(円)"), errors="coerce") or 0)
+            if not nm or val <= 0:
+                continue
+            records.append({
+                "ticker": nm, "name": nm, "asset_type": "その他",
+                "shares": 1, "avg_cost": cost if cost > 0 else val,
+                "currency": "JPY", "manual_price": val,
+            })
+        with st.spinner("保存中..."):
+            n = db.bulk_upsert_holdings(OTHER_BROKER, records, replace=True)
+        st.cache_data.clear()
+        st.success(f"{n} 件を保存しました。")
+        st.rerun()
+
+
 def tab_manage_holdings():
     st.subheader("🏦 銘柄管理")
 
@@ -928,6 +1000,7 @@ def main():
         "💼 ポートフォリオ",
         "💰 配当・増配率",
         "🏦 銘柄管理",
+        "🏛️ その他資産",
         "📝 取引入力",
         "💵 配当受取",
         "✏️ 配当履歴入力",
@@ -937,9 +1010,10 @@ def main():
     with tabs[1]: tab_portfolio()
     with tabs[2]: tab_dividend_growth()
     with tabs[3]: tab_manage_holdings()
-    with tabs[4]: tab_transactions()
-    with tabs[5]: tab_dividends_recv()
-    with tabs[6]: tab_manual_div_history()
+    with tabs[4]: tab_other_assets()
+    with tabs[5]: tab_transactions()
+    with tabs[6]: tab_dividends_recv()
+    with tabs[7]: tab_manual_div_history()
 
 
 if __name__ == "__main__":
